@@ -1,0 +1,42 @@
+# Python
+.venv/
+.python/
+.uv-cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node
+node_modules/
+
+# Build outputs
+web-dist/
+web-dist-new/
+dist/
+.build-tmp/
+
+# Local runtime data & secrets — never commit
+.env
+.env.*
+.data-root.local
+runtime-logs/
+test-results/
+*.bak
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Machine-local tooling
+.openai/
+tools/cloudflared.exe
+tools/*.download
+tools/upload-tunnel.yml
+
+# Internal process docs and one-off assets (not part of the published project)
+deliverables/
+research/
+design/
+/*.md
+!README.md
+!INSTALL-PROMPT.md
