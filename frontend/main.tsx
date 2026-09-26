@@ -173,19 +173,35 @@ function UpdateModal(s:Shared&{close:()=>void,targetPublicationId?:string|null})
 }
 
 function GrowthChart({accounts,start,end}:{accounts:Data[],start:string,end:string}){
- const colors=['#d83d4c','#8d9bb2'];const days=Math.round((new Date(end).getTime()-new Date(start).getTime())/86400000)+1;
+ const colors=['#d83d4c','#4a6cf7'];const days=Math.round((new Date(end).getTime()-new Date(start).getTime())/86400000)+1;
  const dates=Array.from({length:days},(_,i)=>new Date(new Date(start).getTime()+i*86400000).toISOString().slice(0,10));
+ const label=(d:string)=>{const t=new Date(d);return (t.getMonth()+1)+'/'+t.getDate()};
  const series=accounts.map(a=>{const points:Data={};(a.points||[]).forEach((p:Data)=>{if(p.value!=null)points[p.local_date]=p.value});return points});
  const values=series.flatMap(p=>Object.values(p)).filter((x):x is number=>x!=null);
+ const [hover,setHover]=useState<{si:number,i:number}|null>(null);
  if(!values.length)return <div className="chart-empty"><TrendingUp size={32}/><p>更新主页数据后，在这里查看粉丝增长曲线</p><small>每次更新都会记录当天的最新粉丝总数，一天一个点</small></div>;
- const min=Math.min(...values),max=Math.max(...values),span=Math.max(1,max-min);
- const y=(v:number)=>150-(v-min)/span*120,x=(i:number)=>days===1?285:35+i*500/(days-1);
+ const lo0=Math.min(...values),hi0=Math.max(...values);
+ const raw=(hi0-lo0)/3||Math.max(1,lo0/3);const mag=Math.pow(10,Math.floor(Math.log10(raw)));const norm=raw/mag;const step=(norm<1.5?1:norm<3?2:norm<7?5:10)*mag;
+ const lo=Math.floor(lo0/step)*step,hi=Math.ceil(hi0/step)*step||lo0+step;
+ const y=(v:number)=>28+(hi-v)/((hi-lo)||1)*128,x=(i:number)=>days===1?300:48+i*496/(days-1);
+ const ticks:number[]=[];for(let t=lo;t<=hi+.1;t+=step)ticks.push(t);
+ const nodesOf=(points:Data)=>dates.map((d,i)=>points[d]!=null?{i,v:points[d]}:null).filter((n):n is {i:number,v:number}=>n!=null);
  const latest=(p:Data)=>{let v=null as number|null;dates.forEach(d=>{if(p[d]!=null)v=p[d]});return v};
- return <div className="growth-chart"><svg viewBox="0 0 570 190" role="img" aria-label="粉丝总数曲线，缺测处断开">
- <text x="30" textAnchor="end" y="32" fill="#9ca4b0" fontSize="11">{number(max)}</text>{min!==max&&<text x="30" textAnchor="end" y="153" fill="#9ca4b0" fontSize="11">{number(min)}</text>}
- {series.map((points,si)=>{const nodes=dates.map((d,i)=>points[d]!=null?{i,v:points[d]}:null).filter((n):n is {i:number,v:number}=>n!=null);return <g key={si}>{nodes.map((n,ni)=><g key={ni}>{ni>0&&<line x1={x(nodes[ni-1].i)} y1={y(nodes[ni-1].v)} x2={x(n.i)} y2={y(n.v)} stroke={colors[si]} strokeWidth="2"/>}<circle cx={x(n.i)} cy={y(n.v)} r="3" fill={colors[si]}><title>{names[accounts[si].platform]} · {dates[n.i]}：{number(n.v)} 粉丝</title></circle></g>)}</g>})}
- <text x={days===1?285:35} textAnchor={days===1?'middle':'start'} y="183" fill="#9ca4b0" fontSize="11">{start}</text>{days>1&&<text x="545" textAnchor="end" y="183" fill="#9ca4b0" fontSize="11">{end}</text>}
- </svg><small>{accounts.map((a,si)=>names[a.platform]+' '+number(latest(series[si]))).join('　·　')}</small></div>
+ return <div className="growth-chart"><svg viewBox="0 0 600 208" onMouseLeave={()=>setHover(null)} role="img" aria-label="粉丝总数曲线，悬停数据点查看数值">
+ {ticks.map(t=><g key={t}><line x1="48" x2="560" y1={y(t)} y2={y(t)} stroke="#edeff3" strokeDasharray="4 5"/><text x="40" textAnchor="end" y={y(t)+3.5} fill="#a8aeb9" fontSize="10">{number(t)}</text></g>)}
+ {dates.map((d,i)=><text key={d} x={x(i)} textAnchor="middle" y="200" fill="#a8aeb9" fontSize="10">{label(d)}</text>)}
+ {series.map((points,si)=>{const nodes=nodesOf(points);return <g key={si}>
+ {nodes.length>1&&<path d={'M'+x(nodes[0].i)+' '+y(lo)+' '+nodes.map(n=>'L'+x(n.i)+' '+y(n.v)).join(' ')+' L'+x(nodes[nodes.length-1].i)+' '+y(lo)+' Z'} fill={colors[si]} opacity="0.05"/>}
+ {nodes.map((n,ni)=><g key={ni}>{ni>0&&<line x1={x(nodes[ni-1].i)} y1={y(nodes[ni-1].v)} x2={x(n.i)} y2={y(n.v)} stroke={colors[si]} strokeWidth="2.5" strokeLinecap="round"/>}<circle cx={x(n.i)} cy={y(n.v)} r="3.5" fill={colors[si]} stroke="#fff" strokeWidth="1.5"/></g>)}
+ {nodes.map(n=><circle key={'h'+n.i} cx={x(n.i)} cy={y(n.v)} r="13" fill="transparent" style={{cursor:'pointer'}} onMouseEnter={()=>setHover({si,i:n.i})}/>)}
+ </g>})}
+ {hover&&series[hover.si][dates[hover.i]]!=null&&(()=>{const v=series[hover.si][dates[hover.i]] as number,bx=x(hover.i),by=Math.max(24,y(v)-28);return <g pointerEvents="none">
+ <line x1={bx} x2={bx} y1={by+15} y2={y(v)-7} stroke="#c6ccd6" strokeDasharray="3 3"/>
+ <circle cx={bx} cy={y(v)} r="5.5" fill="#fff" stroke={colors[hover.si]} strokeWidth="2.5"/>
+ <circle cx={bx} cy={by} r="14" fill={colors[hover.si]}/>
+ <text x={bx} y={by+4} textAnchor="middle" fill="#fff" fontSize="11" fontWeight="700">{number(v)}</text>
+ </g>})()}
+ </svg><div className="chart-legend">{accounts.map((a,si)=><span key={si}><i style={{background:colors[si]}}/>{names[a.platform]} {number(latest(series[si]))}</span>)}</div></div>
 }
 function PublicationEditor({s,publication,close}:{s:Shared,publication:Data,close:()=>void}){
  const [form,setForm]=useState<Data>({title:publication.override?.title||'',body_text:publication.override?.body_text||'',paid_status:publication.paid_status||'unknown'});
