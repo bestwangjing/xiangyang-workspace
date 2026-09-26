@@ -243,11 +243,11 @@ def latest_metrics(c,column,subject):
     return dict(values=values,field_sources=sources,observed_at=rows[0]['observed_at'] if rows else None)
 
 @app.get('/api/dashboard')
-def dashboard(days:int=7):
-    if days not in [7,30]: fail('日期范围无效')
+def dashboard(days:int=15):
+    if days not in [15,30]: fail('日期范围无效')
     local_tz=timezone(timedelta(hours=8))
     end=datetime.now(local_tz).date()
-    start=end-timedelta(days=days)
+    start=end-timedelta(days=days-1)
     with db.connect() as c:
         accounts=db.rows(c,'SELECT * FROM accounts')
         for a in accounts:
@@ -257,11 +257,17 @@ def dashboard(days:int=7):
             a['unknown_dates']=c.execute("SELECT count(*) FROM publications WHERE account_id=? AND status='published' AND published_time_status!='confirmed'",(a['id'],)).fetchone()[0]
             from .metrics import effective_values
             points=[dict(observed_at=x['observed_at'],value=effective_values(c,x['id']).get('fans')) for x in db.rows(c,"SELECT id,observed_at FROM metric_snapshots WHERE account_id=? AND scope='cumulative' AND observed_at IS NOT NULL ORDER BY observed_at",(a['id'],))]
-            a['points']=points
             for point in points: point['local_date']=datetime.fromisoformat(point['observed_at']).astimezone(local_tz).date().isoformat()
             first=next((x for x in reversed(points) if x['local_date']==start.isoformat()),None)
             last=next((x for x in reversed(points) if x['local_date']==end.isoformat()),None)
             a['growth']=last['value']-first['value'] if first and last and first['value'] is not None and last['value'] is not None else None
+            # Chart series: one point per day (same-day refreshes keep the latest
+            # observation), limited to the requested window.
+            daily={}
+            for point in points:
+                if point['value'] is None: continue
+                if start.isoformat()<=point['local_date']<=end.isoformat(): daily[point['local_date']]=point['value']
+            a['points']=[dict(local_date=k,value=v) for k,v in sorted(daily.items())]
         report=db.one(c,"SELECT report_json,created_at FROM review_reports WHERE kind='account' ORDER BY created_at DESC LIMIT 1")
         analysis=dict(**db.load(report['report_json']),created_at=report['created_at']) if report else None
         return dict(accounts=accounts,start=str(start),end=str(end),profile=db.snapshot(c),analysis=analysis,local_contents=c.execute('SELECT count(*) FROM contents').fetchone()[0])

@@ -121,6 +121,33 @@ def test_fetch_writes_snapshots_shows_on_dashboard_and_is_idempotent(client):
         assert c.execute("SELECT count(*) FROM metric_snapshots WHERE source='homepage_api'").fetchone()[0] == 2, '同任务重试不得重复写快照'
 
 
+def test_dashboard_points_one_per_day_latest_wins_and_window_limited(client):
+    """Chart series: same-day refreshes collapse to the latest fans value; snapshots
+    older than the 15-day window are dropped."""
+    assert save_profile(client, xiaohongshu_homepage=XHS_URL).status_code == 200
+    login_douyin()
+    run_fetch('job-d1', {'xiaohongshu': XHS_URL}, SEC_UID)
+
+    def bumped(secret, path, params):
+        if path == '/xiaohongshu/app_v2/get_user_info':
+            return {'success': True, 'data': {'fans': 900, 'ndiscovery': 42, 'note_num_stat': {'posted': 42}}, 'code': 0, 'msg': '成功'}
+        return fake_request(secret, path, params)
+
+    with patch.object(providers, 'provider_secret', return_value='test-key'), patch.object(hm, '_request', side_effect=bumped):
+        hm.run_homepage_fetch('job-d2', dict(homepages={'xiaohongshu': XHS_URL}, sec_uid=SEC_UID))
+    from datetime import datetime, timezone, timedelta
+    with db.connect() as c:
+        oldest = c.execute("SELECT id FROM metric_snapshots WHERE account_id=(SELECT id FROM accounts WHERE platform='xiaohongshu') ORDER BY created_at LIMIT 1").fetchone()[0]
+        c.execute("UPDATE metric_snapshots SET observed_at=? WHERE id=?", ((datetime.now(timezone.utc) - timedelta(days=20)).isoformat(), oldest))
+    payload = client.get('/api/dashboard').json()
+    xhs = next(a for a in payload['accounts'] if a['platform'] == 'xiaohongshu')
+    today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+    assert [p['local_date'] for p in xhs['points']] == [today], '同一天多次更新只保留一个点，窗口外的旧观测被剔除'
+    assert xhs['points'][0]['value'] == 900, '当天取最新一次观测'
+    assert payload['end'] == today
+    assert payload['start'] == (datetime.now(timezone(timedelta(hours=8))).date() - timedelta(days=14)).isoformat()
+
+
 def test_fetch_partial_failure_keeps_success_and_reports_error(client):
     assert save_profile(client, xiaohongshu_homepage=XHS_URL).status_code == 200
     login_douyin()
