@@ -64,16 +64,17 @@ def _douyin_posts(secret, sec_uid):
                 if value:
                     values[target] = value
             cover = None
-            video = a.get('video') or {}
-            for key in ['cover', 'origin_cover', 'dynamic_cover']:
-                urls = (video.get(key) or {}).get('url_list') or []
-                if urls:
-                    cover = urls[0]
-                    break
+            images = a.get('images') or []
+            if images and isinstance(images[0], dict):
+                # url_list entries are .heic (browsers won't render); download_url_list is webp.
+                cover = (images[0].get('download_url_list') or images[0].get('url_list') or [None])[0]
             if not cover:
-                images = a.get('images') or [{}]
-                urls = (images[0] or {}).get('url_list') or []
-                cover = urls[0] if urls else None
+                video = a.get('video') or {}
+                for key in ['cover', 'origin_cover', 'dynamic_cover']:
+                    urls = (video.get(key) or {}).get('url_list') or []
+                    if urls:
+                        cover = urls[0]
+                        break
             title = (a.get('desc') or '').splitlines()[0].strip()[:200] or '(未命名作品)'
             posts.append(dict(
                 post_id=str(a['aweme_id']),
@@ -110,7 +111,7 @@ def _xiaohongshu_posts(secret, user_id):
             if not note_id:
                 continue
             values = {}
-            for source, target in [('likes', 'likes'), ('comments_count', 'comments'), ('collected_count', 'saves'), ('share_count', 'shares')]:
+            for source, target in [('likes', 'likes'), ('comments_count', 'comments'), ('collected_count', 'saves'), ('share_count', 'shares'), ('view_count', 'views')]:
                 value = _num(n.get(source))
                 if value:
                     values[target] = value

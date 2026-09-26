@@ -6,7 +6,7 @@ from test_workspace import client, make_publication
 from test_homepage import save_profile, configure_tikhub, login_douyin, SEC_UID, XHS_URL, DY_URL
 
 XHS_NOTES = [{'id': 'note-1', 'display_title': '第一篇图文笔记', 'type': 'normal', 'create_time': 1758800000, 'cursor': 'note-1',
-              'likes': 123, 'comments_count': 4, 'collected_count': 5, 'share_count': 6,
+              'likes': 123, 'comments_count': 4, 'collected_count': 5, 'share_count': 6, 'view_count': 777,
               'images_list': [{'url': 'https://img.example/xhs-1.jpg'}]},
              {'id': 'note-2', 'display_title': '第二篇视频笔记', 'type': 'video', 'create_time': 1758900000, 'cursor': 'note-2',
               'likes': 10, 'comments_count': 1, 'collected_count': 2, 'share_count': 0,
@@ -15,7 +15,11 @@ XHS_NOTES_PAGE2 = [{'id': 'note-3', 'display_title': '第三篇图文笔记', 't
                     'likes': 7, 'comments_count': 0, 'collected_count': 0, 'share_count': 1, 'images_list': []}]
 DY_AWEMES = [{'aweme_id': 'aweme-1', 'desc': '第一支视频作品', 'create_time': 1758800100,
               'statistics': {'digg_count': 99, 'comment_count': 3, 'collect_count': 7, 'share_count': 2, 'play_count': 500},
-              'video': {'cover': {'url_list': ['https://img.example/dy-1.jpg']}}}]
+              'video': {'cover': {'url_list': ['https://img.example/dy-1.jpg']}}},
+             {'aweme_id': 'aweme-2', 'desc': '第二篇图文作品', 'create_time': 1758800200,
+              'statistics': {'digg_count': 26, 'comment_count': 0, 'collect_count': 21, 'share_count': 2, 'play_count': 0},
+              'video': {'cover': {'url_list': ['https://img.example/dy-2.heic']}},
+              'images': [{'url_list': ['https://img.example/dy-2.heic'], 'download_url_list': ['https://img.example/dy-2.webp']}]}]
 
 
 def fake_posts_request(secret, path, params):
@@ -48,10 +52,9 @@ def test_sync_douyin_via_homepage_link_without_login(client):
     result = run_sync('job-dy-link', homepages={}, sec_uid=None)
     assert not result['errors'] and len(result['items']) == 1
     assert result['items'][0]['note_id'] == 'douyin'
-    rows = client.get('/api/publications').json()
-    assert rows and all(r['platform'] == 'douyin' for r in rows)
-    assert rows[0]['platform_post_id'] == 'aweme-1'
-    assert rows[0]['metrics']['values']['views'] == 500, 'app_v3 自带播放量，无需登录'
+    rows = {r['platform_post_id']: r for r in client.get('/api/publications').json()}
+    assert set(rows) == {'aweme-1', 'aweme-2'}
+    assert rows['aweme-1']['metrics']['values']['views'] == 500, 'app_v3 自带播放量，无需登录'
     with db.connect() as c:
         assert c.execute("SELECT sec_uid FROM accounts WHERE platform='douyin'").fetchone()[0] == SEC_UID
 
@@ -61,19 +64,22 @@ def test_sync_creates_publications_with_metrics_cover_and_time(client):
     result = run_sync('job-p1')
     assert not result['errors'] and len(result['items']) == 2
     rows = {r['platform_post_id']: r for r in client.get('/api/publications').json()}
-    assert set(rows) == {'note-1', 'note-2', 'note-3', 'aweme-1'}, '两页笔记都应入库'
+    assert set(rows) == {'note-1', 'note-2', 'note-3', 'aweme-1', 'aweme-2'}, '两页笔记与抖音作品都应入库'
     assert rows['note-1']['title'] == '第一篇图文笔记'
     assert rows['note-1']['cover_url'] == 'https://img.example/xhs-1.jpg'
     assert rows['note-1']['platform_kind'] == 'image_post'
     assert rows['note-1']['published_local_date'] == '2025-09-25'
-    assert rows['note-1']['metrics']['values'] == {'likes': 123, 'comments': 4, 'saves': 5, 'shares': 6}
+    assert rows['note-1']['metrics']['values'] == {'likes': 123, 'comments': 4, 'saves': 5, 'shares': 6, 'views': 777}
     assert rows['note-2']['platform_kind'] == 'video'
     assert rows['note-2']['cover_url'] == 'https://img.example/xhs-2.jpg', '封面为空时应回退 url_size_large'
     assert rows['aweme-1']['platform_kind'] == 'video'
     assert rows['aweme-1']['metrics']['values']['likes'] == 99
+    assert rows['aweme-2']['platform_kind'] == 'image_post'
+    assert rows['aweme-2']['cover_url'] == 'https://img.example/dy-2.webp', '图文作品封面应取 webp 下载地址（url_list 为浏览器不渲染的 heic）'
+    assert rows['aweme-2']['metrics']['values'] == {'likes': 26, 'saves': 21, 'shares': 2}, '为零的指标不写入'
     with db.connect() as c:
-        assert c.execute("SELECT count(*) FROM metric_snapshots WHERE source='platform_api'").fetchone()[0] == 4
-        assert c.execute('SELECT count(*) FROM publications').fetchone()[0] == 4
+        assert c.execute("SELECT count(*) FROM metric_snapshots WHERE source='platform_api'").fetchone()[0] == 5
+        assert c.execute('SELECT count(*) FROM publications').fetchone()[0] == 5
 
 
 def test_sync_is_idempotent_per_job_and_incremental_across_jobs(client):
@@ -81,12 +87,12 @@ def test_sync_is_idempotent_per_job_and_incremental_across_jobs(client):
     run_sync('job-p1')
     run_sync('job-p1')
     with db.connect() as c:
-        assert c.execute('SELECT count(*) FROM publications').fetchone()[0] == 4, '同任务重试不得重复建作品'
-        assert c.execute('SELECT count(*) FROM metric_snapshots').fetchone()[0] == 4, '同任务重试不得重复写快照'
+        assert c.execute('SELECT count(*) FROM publications').fetchone()[0] == 5, '同任务重试不得重复建作品'
+        assert c.execute('SELECT count(*) FROM metric_snapshots').fetchone()[0] == 5, '同任务重试不得重复写快照'
     run_sync('job-p2')
     with db.connect() as c:
-        assert c.execute('SELECT count(*) FROM publications').fetchone()[0] == 4, '增量同步复用已有作品行'
-        assert c.execute('SELECT count(*) FROM metric_snapshots').fetchone()[0] == 8, '新一次同步记录新的观测'
+        assert c.execute('SELECT count(*) FROM publications').fetchone()[0] == 5, '增量同步复用已有作品行'
+        assert c.execute('SELECT count(*) FROM metric_snapshots').fetchone()[0] == 10, '新一次同步记录新的观测'
 
 
 def test_sync_preserves_confirmed_time_and_manual_title(client):
@@ -131,7 +137,7 @@ def test_creator_cookie_enriches_douyin_play_counts(client, tmp_path, monkeypatc
          patch.object(pp, '_post_request', side_effect=fake_overview):
         result = pp.run_posts_fetch('job-p3', dict(homepages={'xiaohongshu': XHS_URL}, sec_uid=SEC_UID))
     assert not result['errors']
-    douyin = next(r for r in client.get('/api/publications').json() if r['platform'] == 'douyin')
+    douyin = next(r for r in client.get('/api/publications').json() if r['platform_post_id'] == 'aweme-1')
     assert douyin['metrics']['values']['views'] == 800, '创作者接口播放量应覆盖公开统计'
 
 
