@@ -445,13 +445,14 @@ def backup():
     with db.connect() as c, sqlite3.connect(dest) as target: c.backup(target)
     return dict(filename=dest.name,includes_media=False,message='数据库备份完成；媒体文件需单独备份。')
 
-from . import providers, models, reports, mobile, homepage_metrics, douyin_login, platform_posts
+from . import providers, models, reports, mobile, homepage_metrics, douyin_login, platform_posts, post_detail
 app.include_router(providers.router)
 app.include_router(models.router)
 app.include_router(reports.router)
 app.include_router(homepage_metrics.router)
 app.include_router(douyin_login.router)
 app.include_router(platform_posts.router)
+app.include_router(post_detail.router)
 app.include_router(mobile.router)
 
 if WEB.exists(): app.mount('/',StaticFiles(directory=WEB,html=True),name='web')
