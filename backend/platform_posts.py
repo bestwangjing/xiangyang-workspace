@@ -47,6 +47,15 @@ def _num(value):
     return metric_number(value)
 
 
+def _renderable(urls):
+    """Pick the first browser-renderable url; url_list[0] is often .heic which
+    Chrome/Edge cannot display, while later entries are jpeg/webp."""
+    for u in urls or []:
+        if u and '.heic' not in u:
+            return u
+    return (urls or [None])[0]
+
+
 def _douyin_posts(secret, sec_uid):
     posts = []
     cursor = 0
@@ -66,14 +75,12 @@ def _douyin_posts(secret, sec_uid):
             cover = None
             images = a.get('images') or []
             if images and isinstance(images[0], dict):
-                # url_list entries are .heic (browsers won't render); download_url_list is webp.
-                cover = (images[0].get('download_url_list') or images[0].get('url_list') or [None])[0]
+                cover = _renderable(images[0].get('download_url_list')) or _renderable(images[0].get('url_list'))
             if not cover:
                 video = a.get('video') or {}
                 for key in ['cover', 'origin_cover', 'dynamic_cover']:
-                    urls = (video.get(key) or {}).get('url_list') or []
-                    if urls:
-                        cover = urls[0]
+                    cover = _renderable((video.get(key) or {}).get('url_list'))
+                    if cover:
                         break
             title = (a.get('desc') or '').splitlines()[0].strip()[:200] or '(未命名作品)'
             posts.append(dict(
@@ -176,7 +183,7 @@ def _upsert(c, job_id, account, post, observed):
         publication_id = existing['id']
         sets = []
         args = []
-        if post['cover_url'] and not existing['cover_url']:
+        if post['cover_url'] and (not existing['cover_url'] or ('.heic' in existing['cover_url'] and '.heic' not in post['cover_url'])):
             sets.append('cover_url=?')
             args.append(post['cover_url'])
         if post['published'] and existing['published_time_status'] != 'confirmed':

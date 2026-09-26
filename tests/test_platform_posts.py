@@ -15,7 +15,7 @@ XHS_NOTES_PAGE2 = [{'id': 'note-3', 'display_title': '第三篇图文笔记', 't
                     'likes': 7, 'comments_count': 0, 'collected_count': 0, 'share_count': 1, 'images_list': []}]
 DY_AWEMES = [{'aweme_id': 'aweme-1', 'desc': '第一支视频作品', 'create_time': 1758800100,
               'statistics': {'digg_count': 99, 'comment_count': 3, 'collect_count': 7, 'share_count': 2, 'play_count': 500},
-              'video': {'cover': {'url_list': ['https://img.example/dy-1.jpg']}}},
+              'video': {'cover': {'url_list': ['https://img.example/dy-1.heic', 'https://img.example/dy-1.jpeg']}}},
              {'aweme_id': 'aweme-2', 'desc': '第二篇图文作品', 'create_time': 1758800200,
               'statistics': {'digg_count': 26, 'comment_count': 0, 'collect_count': 21, 'share_count': 2, 'play_count': 0},
               'video': {'cover': {'url_list': ['https://img.example/dy-2.heic']}},
@@ -74,6 +74,7 @@ def test_sync_creates_publications_with_metrics_cover_and_time(client):
     assert rows['note-2']['cover_url'] == 'https://img.example/xhs-2.jpg', '封面为空时应回退 url_size_large'
     assert rows['aweme-1']['platform_kind'] == 'video'
     assert rows['aweme-1']['metrics']['values']['likes'] == 99
+    assert rows['aweme-1']['cover_url'] == 'https://img.example/dy-1.jpeg', 'url_list 里应跳过 heic 取可渲染格式'
     assert rows['aweme-2']['platform_kind'] == 'image_post'
     assert rows['aweme-2']['cover_url'] == 'https://img.example/dy-2.webp', '图文作品封面应取 webp 下载地址（url_list 为浏览器不渲染的 heic）'
     assert rows['aweme-2']['metrics']['values'] == {'likes': 26, 'saves': 21, 'shares': 2}, '为零的指标不写入'
@@ -93,6 +94,17 @@ def test_sync_is_idempotent_per_job_and_incremental_across_jobs(client):
     with db.connect() as c:
         assert c.execute('SELECT count(*) FROM publications').fetchone()[0] == 5, '增量同步复用已有作品行'
         assert c.execute('SELECT count(*) FROM metric_snapshots').fetchone()[0] == 10, '新一次同步记录新的观测'
+
+
+def test_sync_replaces_heic_cover_with_renderable_one(client):
+    """Rows stored with an unrenderable .heic cover get it replaced on the next sync."""
+    prepare(client)
+    run_sync('job-p1')
+    with db.connect() as c:
+        c.execute("UPDATE publications SET cover_url='https://img.example/dy-1.heic?lk3s=1' WHERE platform_post_id='aweme-1'")
+    run_sync('job-p2')
+    row = next(r for r in client.get('/api/publications').json() if r['platform_post_id'] == 'aweme-1')
+    assert row['cover_url'] == 'https://img.example/dy-1.jpeg', 'heic 封面应被可渲染格式替换'
 
 
 def test_sync_preserves_confirmed_time_and_manual_title(client):
