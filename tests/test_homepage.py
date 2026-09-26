@@ -1,5 +1,5 @@
 import time
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 from backend import db, providers
 from backend import homepage_metrics as hm
 from test_workspace import client
@@ -44,6 +44,41 @@ def test_profile_saves_validates_and_normalizes_xiaohongshu_homepage(client):
     assert client.get('/api/profile').json()['homepages'] == {'xiaohongshu': None, 'douyin': None}
 
 
+def test_profile_saves_validates_and_normalizes_douyin_homepage(client):
+    r = save_profile(client, douyin_homepage=XHS_URL)
+    assert r.status_code == 422, '小红书链接填入抖音字段应被拒绝'
+    r = save_profile(client, douyin_homepage='https://v.douyin.com/3eRRxNgvHY8/')
+    assert r.status_code == 200, r.text
+    homepages = client.get('/api/profile').json()['homepages']
+    assert homepages['douyin'] == 'https://v.douyin.com/3eRRxNgvHY8/'
+    r = save_profile(client, douyin_homepage=DY_URL + '?x=1')
+    assert r.status_code == 422, '带查询串的抖音链接应被拒绝'
+    r = save_profile(client, douyin_homepage='')
+    assert r.status_code == 200
+    assert client.get('/api/profile').json()['homepages']['douyin'] is None
+
+
+def test_fetch_douyin_from_homepage_link_without_login(client):
+    """No QR login anywhere: the douyin homepage link alone drives sec_uid resolution.
+    A numeric douyin-ID link resolves via profile_v2; a sec_uid link needs no call at all."""
+    assert save_profile(client, douyin_homepage='https://www.douyin.com/user/42168387231').status_code == 200
+    result = run_fetch('job-dy-id', {}, None)
+    assert not result['errors'] and len(result['items']) == 1
+    assert result['items'][0]['note_id'] == 'douyin'
+    accounts = {a['platform']: a for a in client.get('/api/dashboard').json()['accounts']}
+    assert accounts['douyin']['metrics']['values'] == {'fans': 1234, 'published_count': 56}
+    with db.connect() as c:
+        assert c.execute("SELECT sec_uid FROM accounts WHERE platform='douyin'").fetchone()[0] == SEC_UID, '解析出的 sec_uid 应落库复用'
+    # A sec_uid-shaped link resolves locally without any TikHub call.
+    assert save_profile(client, douyin_homepage='https://www.douyin.com/user/' + SEC_UID).status_code == 200
+    with db.connect() as c:
+        c.execute("UPDATE accounts SET sec_uid=NULL WHERE platform='douyin'")
+    result = run_fetch('job-dy-sec', {}, None)
+    assert not result['errors']
+    with db.connect() as c:
+        assert c.execute("SELECT sec_uid FROM accounts WHERE platform='douyin'").fetchone()[0] == SEC_UID
+
+
 def test_refresh_requires_tikhub_and_either_source(client):
     assert client.post('/api/accounts/homepage/refresh').status_code == 400
     configure_tikhub()
@@ -56,7 +91,7 @@ def test_refresh_requires_tikhub_and_either_source(client):
 
 
 def fake_request(secret, path, params):
-    if path == '/douyin/web/get_sec_user_id': return {'sec_user_id': SEC_UID}
+    if path == '/douyin/web/handler_user_profile_v2': return {'sec_uid': SEC_UID}
     if path == '/douyin/app/v3/handler_user_profile': return {'user': {'follower_count': 1234, 'aweme_count': 56}}
     if path == '/xiaohongshu/app_v2/get_user_info':
         # Real app_v2 shape: the user object sits under data.data.
@@ -146,7 +181,8 @@ def test_douyin_homepage_link_still_resolves_sec_uid_when_present(client):
     assert save_profile(client, xiaohongshu_homepage=XHS_URL).status_code == 200
     with db.connect() as c:
         c.execute("UPDATE accounts SET homepage=? WHERE platform='douyin'", (SHORT_URL,))
-    with patch.object(providers, 'provider_secret', return_value='test-key'), patch.object(hm, '_request', side_effect=fake_request):
+    redirect = Mock(url='https://www.douyin.com/user/' + SEC_UID)
+    with patch.object(providers, 'provider_secret', return_value='test-key'), patch.object(hm, '_request', side_effect=fake_request), patch.object(hm.httpx, 'get', return_value=redirect):
         result = hm.run_homepage_fetch('job-4', dict(homepages={'xiaohongshu': XHS_URL}))
     assert not result['errors']
     with db.connect() as c:

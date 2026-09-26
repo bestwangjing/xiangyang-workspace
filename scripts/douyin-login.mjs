@@ -15,17 +15,31 @@ mkdirSync(workDir, { recursive: true });
 const write = (phase, message) => writeFileSync(path.join(workDir, 'status.json'), JSON.stringify({ phase, message, ts: new Date().toISOString() }));
 
 const LOGIN_TIMEOUT_MS = 6 * 60 * 1000;
-// The sessionid cookie can appear at scan time while the phone confirmation
-// (and the web session behind it) lands seconds later, so one anonymous
-// round does not mean the login failed — retry the ladder.
+// The sessionid cookie can appear at scan time while the web session behind
+// it lands seconds later (or is briefly rejected as unverified), so one
+// anonymous round does not mean the login failed — retry the ladder.
 const EXTRACT_ATTEMPTS = 4;
 const EXTRACT_GAP_MS = 10 * 1000;
 const SEC_UID_RE = /\/user\/(?!self)([A-Za-z0-9_-]{20,})/;
 const hasSession = async (ctx, domain) => (await ctx.cookies('https://' + domain)).some(c => c.name === 'sessionid');
 
+// Legacy passport endpoint: needs no a_bogus signature, returns the session
+// owner's sec_uid directly. Cheapest and most reliable probe.
+async function passportSelfInfo(page) {
+  try {
+    const body = await page.evaluate(async () => {
+      const r = await fetch('/passport/web/get_user_info/?from_login=0&aid=6383&app_id=1128', { credentials: 'include' });
+      return await r.json();
+    });
+    if (body && /^[A-Za-z0-9_-]{20,}$/.test(body.sec_uid || '')) {
+      return { sec_uid: body.sec_uid, nickname: body.name || null };
+    }
+  } catch {}
+  return null;
+}
+
 // Current logged-in user via the web IM endpoint, fetched in page context so
-// douyin cookies are attached and no signature is required. Unambiguous:
-// the response describes the session owner only.
+// douyin cookies are attached. Unambiguous: describes the session owner only.
 async function imSelfInfo(page) {
   try {
     const body = await page.evaluate(async () => {
@@ -41,10 +55,8 @@ async function imSelfInfo(page) {
 }
 
 // /user/self redirects to /user/<sec_uid> once the web session is live.
-// When the SPA renders the profile without changing the URL, the embedded
-// secUid still belongs to the session owner — but that content fallback is
-// ONLY trusted while the URL is still /user/self. On an anonymous feed page
-// (e.g. /jingxuan) every secUid in the DOM belongs to someone else.
+// The embedded-secUid fallback is ONLY trusted while the URL is still
+// /user/self — on an anonymous feed page every secUid belongs to someone else.
 async function selfProfile(page) {
   try {
     await page.goto('https://www.douyin.com/user/self', { waitUntil: 'domcontentloaded', timeout: 20000 });
@@ -94,10 +106,16 @@ async function headerSelfLink(page) {
 
 let ctx;
 try {
+  // Douyin risk-control rejects web sessions from automation-flagged browsers
+  // (QR login "succeeds", then every page redirects to the anonymous feed),
+  // so hide the two webdriver signals Playwright exposes by default.
   ctx = await chromium.launchPersistentContext(path.join(workDir, 'browser-profile'), {
     headless: false,
     viewport: { width: 1280, height: 860 },
-    args: ['--lang=zh-CN'],
+    args: ['--lang=zh-CN', '--disable-blink-features=AutomationControlled'],
+  });
+  await ctx.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
   const page = ctx.pages()[0] || await ctx.newPage();
   write('open', '正在打开抖音登录页');
@@ -113,14 +131,19 @@ try {
   write('login_ok', '登录成功，正在读取账号信息');
   await page.waitForTimeout(2500);
 
-  // sec_uid ladder: IM self info → /user/self redirect → creator dashboard →
-  // homepage header avatar. Every step identifies the session owner only.
+  // sec_uid ladder: passport self info → IM self info → /user/self redirect →
+  // creator dashboard → homepage header avatar. Every step identifies the
+  // session owner only.
   let sec_uid = null, nickname = null, creatorTab = null, failures = [];
   for (let attempt = 1; attempt <= EXTRACT_ATTEMPTS && !sec_uid; attempt++) {
     if (attempt > 1) await page.waitForTimeout(EXTRACT_GAP_MS);
     const failed = [];
-    const im = await imSelfInfo(page);
-    if (im) { sec_uid = im.sec_uid; nickname = im.nickname; } else failed.push('IM接口');
+    const passport = await passportSelfInfo(page);
+    if (passport) { sec_uid = passport.sec_uid; nickname = passport.nickname; } else failed.push('用户信息接口');
+    if (!sec_uid) {
+      const im = await imSelfInfo(page);
+      if (im) { sec_uid = im.sec_uid; nickname = im.nickname; } else failed.push('IM接口');
+    }
     if (!sec_uid) {
       const self = await selfProfile(page);
       if (self) sec_uid = self.sec_uid; else failed.push('主页跳转');
@@ -151,7 +174,7 @@ try {
     try {
       write('creator', '正在连接抖音创作者平台（用于作品播放量）');
       const p2 = await ctx.newPage();
-      await p2.goto('https://creator.douyin.com/creator-micro/home', { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await p2.goto('https://creator.douyin.com/creator-micro/home', { waitUntil: 'domcontentloaded', timeout: 30000 });
       await p2.waitForTimeout(6000);
       creator_cookies = await ctx.cookies('https://creator.douyin.com');
       await p2.close().catch(() => {});
@@ -159,14 +182,16 @@ try {
   }
 
   if (!sec_uid) {
-    write('failed', '登录成功但未能读取主页用户ID（已重试' + EXTRACT_ATTEMPTS + '次：' + failures.join('、') + '均未返回，页面停留在 ' + (page.url() || '').slice(0, 90) + '），请重新发起一次扫码登录');
+    let webdriver = 'unknown';
+    try { webdriver = await page.evaluate(() => String(navigator.webdriver)); } catch {}
+    write('failed', '登录成功但未能读取主页用户ID（已重试' + EXTRACT_ATTEMPTS + '次：' + failures.join('、') + '均未返回，页面停留在 ' + (page.url() || '').slice(0, 90) + '，webdriver=' + webdriver + '）。请重新发起一次扫码登录');
     await ctx.close();
     process.exit(1);
   }
 
   if (!nickname) {
     try {
-      await page.goto('https://www.douyin.com/user/' + sec_uid, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.goto('https://www.douyin.com/user/' + sec_uid, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForTimeout(2500);
       nickname = (await page.title()).split('的个人主页')[0].split('的主页')[0] || null;
     } catch {}

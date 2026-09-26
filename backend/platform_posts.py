@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 import httpx
 from fastapi import APIRouter
 from . import db, sync
-from .homepage_metrics import _request, BASE, PLATFORM_NAMES, parse_homepage
+from .homepage_metrics import _request, BASE, PLATFORM_NAMES, parse_homepage, resolve_douyin_sec_uid
 from .providers import provider_secret, ProviderError, reserve_call
 from .metrics import number as metric_number
 
@@ -212,15 +212,23 @@ def run_posts_fetch(job_id, payload):
     errors = []
     with db.connect() as c:
         accounts = {a['platform']: a for a in db.rows(c, 'SELECT * FROM accounts')}
+        dy_homepage = accounts.get('douyin', {}).get('homepage')
         sec_uid = accounts.get('douyin', {}).get('sec_uid') or payload.get('sec_uid')
         xhs_homepage = payload.get('homepages', {}).get('xiaohongshu') or accounts.get('xiaohongshu', {}).get('homepage')
+    # Douyin works from either a QR-login sec_uid or the configured homepage link
+    # (resolved via TikHub like homepage refresh does) — no login required.
+    if not sec_uid and dy_homepage:
+        reserve_call('tikhub', 'posts_douyin_resolve')
+        sec_uid = resolve_douyin_sec_uid(secret, dy_homepage)
+        with db.connect() as c:
+            c.execute("UPDATE accounts SET sec_uid=?, platform_account_id=? WHERE platform='douyin'", (sec_uid, sec_uid))
     plans = []
     if xhs_homepage:
         plans.append(('xiaohongshu', xhs_homepage))
     if sec_uid:
         plans.append(('douyin', sec_uid))
     if not plans:
-        raise ProviderError('没有可拉取的账号：请先配置小红书主页链接，或扫码登录抖音')
+        raise ProviderError('没有可拉取的账号：请先在账号画像中配置小红书或抖音的个人主页链接')
     for platform, identifier in plans:
         name = PLATFORM_NAMES[platform]
         try:
@@ -262,10 +270,11 @@ def sync_posts():
     with db.connect() as c:
         tikhub = db.one(c, "SELECT credential_ref FROM provider_settings WHERE provider='tikhub'")
         xhs_homepage = db.one(c, "SELECT homepage FROM accounts WHERE platform='xiaohongshu'")['homepage']
+        dy_homepage = db.one(c, "SELECT homepage FROM accounts WHERE platform='douyin'")['homepage']
         sec_uid = db.one(c, "SELECT sec_uid FROM accounts WHERE platform='douyin'")['sec_uid']
     if not tikhub or not tikhub['credential_ref']:
         raise ValueError('请先在数据源设置中配置 TikHub')
-    if not xhs_homepage and not sec_uid:
-        raise ValueError('请先在账号画像与偏好中配置小红书主页链接，或扫码登录抖音')
+    if not xhs_homepage and not sec_uid and not dy_homepage:
+        raise ValueError('请先在账号画像与偏好中配置小红书或抖音的个人主页链接')
     minute = datetime.now(timezone(timedelta(hours=8))).strftime('%Y%m%d%H%M')
     return enqueue('posts_fetch', dict(homepages={'xiaohongshu': xhs_homepage}, sec_uid=sec_uid), 'posts_sync:' + minute, exclusive=True)

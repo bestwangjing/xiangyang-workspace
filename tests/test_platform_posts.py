@@ -3,7 +3,7 @@ from unittest.mock import patch
 from backend import db, providers, worker
 from backend import platform_posts as pp
 from test_workspace import client, make_publication
-from test_homepage import save_profile, configure_tikhub, login_douyin, SEC_UID, XHS_URL
+from test_homepage import save_profile, configure_tikhub, login_douyin, SEC_UID, XHS_URL, DY_URL
 
 XHS_NOTES = [{'id': 'note-1', 'display_title': '第一篇图文笔记', 'type': 'normal', 'create_time': 1758800000, 'cursor': 'note-1',
               'likes': 123, 'comments_count': 4, 'collected_count': 5, 'share_count': 6,
@@ -39,6 +39,21 @@ def prepare(client):
     worker.worker.stop()
     assert save_profile(client, xiaohongshu_homepage=XHS_URL).status_code == 200
     login_douyin()
+
+
+def test_sync_douyin_via_homepage_link_without_login(client):
+    """No QR login: a sec_uid homepage link resolves locally and syncs douyin posts."""
+    worker.worker.stop()
+    assert save_profile(client, douyin_homepage='https://www.douyin.com/user/' + SEC_UID).status_code == 200
+    result = run_sync('job-dy-link', homepages={}, sec_uid=None)
+    assert not result['errors'] and len(result['items']) == 1
+    assert result['items'][0]['note_id'] == 'douyin'
+    rows = client.get('/api/publications').json()
+    assert rows and all(r['platform'] == 'douyin' for r in rows)
+    assert rows[0]['platform_post_id'] == 'aweme-1'
+    assert rows[0]['metrics']['values']['views'] == 500, 'app_v3 自带播放量，无需登录'
+    with db.connect() as c:
+        assert c.execute("SELECT sec_uid FROM accounts WHERE platform='douyin'").fetchone()[0] == SEC_UID
 
 
 def test_sync_creates_publications_with_metrics_cover_and_time(client):

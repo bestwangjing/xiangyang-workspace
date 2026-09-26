@@ -24,7 +24,7 @@ def parse_homepage(text):
     if host in ['www.douyin.com', 'douyin.com']:
         if parsed.path.rstrip('/').endswith('/user/self'):
             raise ValueError('这是登录后查看自己主页的地址，不含用户ID。请在抖音搜索自己的抖音号进入公开主页复制地址栏链接，或粘贴手机 App「分享主页」得到的 v.douyin.com 短链')
-        m = re.fullmatch(r'/user/([A-Za-z0-9_-]{20,80})/?', parsed.path)
+        m = re.fullmatch(r'/user/([A-Za-z0-9_-]{4,80})/?', parsed.path)
         if m: return dict(platform='douyin', url='https://www.douyin.com/user/' + m.group(1))
         raise ValueError('抖音主页链接应形如 https://www.douyin.com/user/用户ID，或粘贴手机 App「分享主页」得到的 https://v.douyin.com/ 短链')
     if host == 'v.douyin.com':
@@ -55,6 +55,47 @@ def _request(secret, path, params):
 def _count(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)): return None
     return float(value)
+
+
+def resolve_douyin_sec_uid(secret, url):
+    """Resolve any douyin homepage/video share link to the owner's sec_uid.
+
+    Cheapest path first: sec_uid links cost nothing; v.douyin.com short links
+    resolve locally via free HTTP 302s; only short-ID / video links cost one
+    paid TikHub call (profile_v2 for douyin IDs, one_video for shared posts).
+    """
+    from .providers import ProviderError
+    parsed = parse_homepage(url)
+    url = parsed['url']
+    m = re.search(r'/user/([A-Za-z0-9_-]+)', url)
+    if m and len(m.group(1)) >= 20:
+        return m.group(1)
+    if m:
+        data = _request(secret, '/douyin/web/handler_user_profile_v2', {'unique_id': m.group(1)})
+        sec = data.get('sec_uid') if isinstance(data, dict) else None
+        if isinstance(sec, str) and len(sec) >= 20:
+            return sec
+        raise ProviderError('未能通过抖音号解析出用户ID，请改用主页链接（www.douyin.com/user/… 或 App 分享主页短链）')
+    if 'v.douyin.com' in url:
+        try:
+            response = httpx.get(url, timeout=20, follow_redirects=True,
+                                 headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'})
+            final = str(response.url)
+        except httpx.HTTPError:
+            raise ProviderError('抖音短链解析失败（网络错误），请稍后重试或改用完整主页链接') from None
+        m = re.search(r'/user/([A-Za-z0-9_-]{20,})', final)
+        if m:
+            return m.group(1)
+        m = re.search(r'/(?:video|note)/(\d{6,})', final)
+        if m:
+            data = _request(secret, '/douyin/app/v3/fetch_one_video_v3', {'aweme_id': m.group(1)})
+            author = ((data or {}).get('aweme_detail') or {}).get('author') or {}
+            sec = author.get('sec_uid')
+            if isinstance(sec, str) and len(sec) >= 20:
+                return sec
+            raise ProviderError('未能从分享的作品链接解析出作者用户ID，请改用「分享主页」得到的链接')
+        raise ProviderError('抖音短链未跳转到主页或作品页，请确认复制的是 App「分享主页」或作品分享链接')
+    raise ProviderError('抖音链接格式无法解析，请使用 www.douyin.com/user/… 主页链接或 v.douyin.com 分享短链')
 
 
 def extract_douyin_user(data):
@@ -119,7 +160,7 @@ def refresh_homepage():
         if link['platform'] != 'xiaohongshu': raise ValueError('小红书账号配置的主页链接不属于该平台，请检查')
         parsed['xiaohongshu'] = link['url']
     elif not sec_uid and not accounts.get('douyin', {}).get('homepage'):
-        raise ValueError('请先配置小红书主页链接，或扫码登录抖音后再更新主页数据')
+        raise ValueError('请先配置小红书或抖音的个人主页链接，再更新主页数据')
     minute = datetime.now(timezone(timedelta(hours=8))).strftime('%Y%m%d%H%M')
     return enqueue('homepage_fetch', dict(homepages=parsed, sec_uid=sec_uid), 'homepage_refresh:' + sync.digest([parsed, sec_uid])[:12] + ':' + minute, exclusive=True)
 
@@ -146,14 +187,11 @@ def run_homepage_fetch(job_id, payload):
                 sec_uid = payload.get('sec_uid')
                 if not sec_uid and account.get('homepage'):
                     reserve_call('tikhub', 'homepage_douyin_resolve')
-                    sec = _request(secret, '/douyin/web/get_sec_user_id', {'url': parse_homepage(account['homepage'])['url']})
-                    sec_uid = sec.get('sec_user_id') if isinstance(sec, dict) else None
-                    if not isinstance(sec_uid, str) or not sec_uid:
-                        raise ProviderError('TikHub 未从主页链接解析出用户ID；推荐在账号画像中扫码登录抖音')
+                    sec_uid = resolve_douyin_sec_uid(secret, account['homepage'])
                     with db.connect() as c:
                         c.execute("UPDATE accounts SET sec_uid=?, platform_account_id=? WHERE platform='douyin'", (sec_uid, sec_uid))
                 if not sec_uid:
-                    raise ProviderError('请先在账号画像与偏好中扫码登录抖音')
+                    raise ProviderError('请先在账号画像与偏好中配置抖音个人主页链接（或扫码登录抖音）')
                 reserve_call('tikhub', 'homepage_douyin_profile')
                 data = _request(secret, '/douyin/app/v3/handler_user_profile', {'sec_user_id': sec_uid})
                 values = extract_douyin_user(data)
@@ -170,7 +208,7 @@ def run_homepage_fetch(job_id, payload):
             items.append(dict(note_id=platform, state='completed', title=name + '主页数据已更新', message=summary))
         except ProviderError as exc:
             items.append(dict(note_id=platform, state='failed', title=name + '主页数据更新失败', message=str(exc)))
-    if not items: raise ProviderError('没有已配置的账号：请配置小红书主页链接，或扫码登录抖音')
+    if not items: raise ProviderError('没有已配置的账号：请配置小红书或抖音的个人主页链接')
     failures = [x for x in items if x['state'] != 'completed']
     if failures and not any(x['state'] == 'completed' for x in items):
         raise ProviderError('；'.join(x['message'] for x in failures))

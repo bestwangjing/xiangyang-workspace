@@ -92,6 +92,7 @@ class ProfileInput(BaseModel):
     xiaohongshu_name:str=Field(min_length=1,max_length=80)
     douyin_name:str=Field(min_length=1,max_length=80)
     xiaohongshu_homepage:str=Field(default='',max_length=300)
+    douyin_homepage:str=Field(default='',max_length=300)
     position:str=Field(min_length=1,max_length=600)
     audience:str=Field(min_length=1,max_length=600)
     promise:str=Field(default='',max_length=600)
@@ -114,11 +115,16 @@ class ProfileInput(BaseModel):
             from .homepage_metrics import parse_homepage,PLATFORM_NAMES
             parsed=parse_homepage(link)
             if parsed['platform']!='xiaohongshu': raise ValueError(PLATFORM_NAMES['xiaohongshu']+'账号应填写'+PLATFORM_NAMES['xiaohongshu']+'个人主页链接')
+        dy_link=self.douyin_homepage.strip()
+        if dy_link:
+            from .homepage_metrics import parse_homepage,PLATFORM_NAMES
+            parsed=parse_homepage(dy_link)
+            if parsed['platform']!='douyin': raise ValueError(PLATFORM_NAMES['douyin']+'账号应填写'+PLATFORM_NAMES['douyin']+'个人主页链接（www.douyin.com/user/… 或手机 App 分享主页得到的 v.douyin.com 短链）')
         return self
 
 @app.put('/api/profile')
 def save_profile(value:ProfileInput):
-    payload=value.model_dump(exclude={'expected_profile_version','expected_topic_rule_version','keywords','exclusions','xiaohongshu_homepage'})
+    payload=value.model_dump(exclude={'expected_profile_version','expected_topic_rule_version','keywords','exclusions','xiaohongshu_homepage','douyin_homepage'})
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE')
         old=db.snapshot(c)
@@ -138,6 +144,11 @@ def save_profile(value:ProfileInput):
             from .homepage_metrics import parse_homepage
             homepage=parse_homepage(homepage)['url']
         c.execute("UPDATE accounts SET homepage=? WHERE platform='xiaohongshu'",(homepage,))
+        dy_homepage=value.douyin_homepage.strip() or None
+        if dy_homepage:
+            from .homepage_metrics import parse_homepage
+            dy_homepage=parse_homepage(dy_homepage)['url']
+        c.execute("UPDATE accounts SET homepage=? WHERE platform='douyin'",(dy_homepage,))
         db.audit(c,'profile_saved',str(version))
         result=db.snapshot(c)
         result['homepages']={a['platform']:a['homepage'] for a in db.rows(c,'SELECT platform,homepage FROM accounts')}
