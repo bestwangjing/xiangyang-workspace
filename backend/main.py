@@ -247,17 +247,24 @@ def dashboard(days:int=15):
     if days not in [15,30]: fail('日期范围无效')
     local_tz=timezone(timedelta(hours=8))
     end=datetime.now(local_tz).date()
-    start=end-timedelta(days=days-1)
     with db.connect() as c:
         accounts=db.rows(c,'SELECT * FROM accounts')
+        from .metrics import effective_values
         for a in accounts:
             a['metrics']=latest_metrics(c,'account_id',a['id'])
             a['local_count']=c.execute("SELECT count(*) FROM publications WHERE account_id=? AND status='published'",(a['id'],)).fetchone()[0]
-            a['period_count']=c.execute("SELECT count(*) FROM publications WHERE account_id=? AND status='published' AND published_time_status='confirmed' AND published_local_date>? AND published_local_date<=?",(a['id'],start.isoformat(),end.isoformat())).fetchone()[0]
             a['unknown_dates']=c.execute("SELECT count(*) FROM publications WHERE account_id=? AND status='published' AND published_time_status!='confirmed'",(a['id'],)).fetchone()[0]
-            from .metrics import effective_values
             points=[dict(observed_at=x['observed_at'],value=effective_values(c,x['id']).get('fans')) for x in db.rows(c,"SELECT id,observed_at FROM metric_snapshots WHERE account_id=? AND scope='cumulative' AND observed_at IS NOT NULL ORDER BY observed_at",(a['id'],))]
             for point in points: point['local_date']=datetime.fromisoformat(point['observed_at']).astimezone(local_tz).date().isoformat()
+            a['_points']=points
+        # Day 1 anchors at the earliest fans observation: the window grows forward
+        # from the first tracking day and never exceeds the latest 15 days, so the
+        # chart never shows empty days before tracking began.
+        observed=[p['local_date'] for a in accounts for p in a['_points'] if p['value'] is not None]
+        start=max(datetime.fromisoformat(min(observed)).date(),end-timedelta(days=days-1)) if observed else end
+        for a in accounts:
+            points=a.pop('_points')
+            a['period_count']=c.execute("SELECT count(*) FROM publications WHERE account_id=? AND status='published' AND published_time_status='confirmed' AND published_local_date>? AND published_local_date<=?",(a['id'],start.isoformat(),end.isoformat())).fetchone()[0]
             first=next((x for x in reversed(points) if x['local_date']==start.isoformat()),None)
             last=next((x for x in reversed(points) if x['local_date']==end.isoformat()),None)
             a['growth']=last['value']-first['value'] if first and last and first['value'] is not None and last['value'] is not None else None

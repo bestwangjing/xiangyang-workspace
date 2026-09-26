@@ -121,6 +121,20 @@ def test_fetch_writes_snapshots_shows_on_dashboard_and_is_idempotent(client):
         assert c.execute("SELECT count(*) FROM metric_snapshots WHERE source='homepage_api'").fetchone()[0] == 2, '同任务重试不得重复写快照'
 
 
+def test_dashboard_window_anchors_at_first_observation_day(client):
+    """Day 1 = the first day with a fans observation, not a trailing 15-day window:
+    on the first tracking day start==end==today, so no empty past days appear."""
+    assert save_profile(client, xiaohongshu_homepage=XHS_URL).status_code == 200
+    login_douyin()
+    run_fetch('job-d1', {'xiaohongshu': XHS_URL}, SEC_UID)
+    payload = client.get('/api/dashboard').json()
+    from datetime import datetime, timezone, timedelta
+    today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+    assert payload['start'] == today == payload['end'], '首日记录时窗口从当天开始，不回看空白的过去15天'
+    for a in payload['accounts']:
+        assert [p['local_date'] for p in a['points']] == [today], '首日各平台只有一个点'
+
+
 def test_dashboard_points_one_per_day_latest_wins_and_window_limited(client):
     """Chart series: same-day refreshes collapse to the latest fans value; snapshots
     older than the 15-day window are dropped."""
