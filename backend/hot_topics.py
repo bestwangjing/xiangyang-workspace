@@ -50,6 +50,23 @@ def _dict(value):
     return value if isinstance(value, dict) else {}
 
 
+def _image_url(value):
+    """Pick a browser-renderable cover URL from the common search payload shapes."""
+    if isinstance(value, str) and value.startswith(("http://", "https://")):
+        return value
+    if isinstance(value, list):
+        for item in value:
+            found = _image_url(item)
+            if found:
+                return found
+    if isinstance(value, dict):
+        for key in ("url_default", "url", "url_size_large", "master_url", "download_url_list", "url_list"):
+            found = _image_url(value.get(key))
+            if found and ".heic" not in found.lower():
+                return found
+    return None
+
+
 def _timestamp(value):
     try:
         number = int(value)
@@ -129,12 +146,14 @@ def parse_douyin_posts(body, now=None):
         favorites = _number(stats.get("collect_count"))
         shares = _number(stats.get("share_count"))
         images = item.get("images") or item.get("image_infos") or item.get("image_post_info")
+        cover = _image_url(images) or _image_url(_dict(item.get("video")).get("cover")) or _image_url(item.get("cover"))
         result.append(dict(
             post_id=post_id, title=title, author=_text(author.get("nickname") or author.get("unique_id")) or "未知作者",
             published_at=published.isoformat(), likes=likes, comments=comments, favorites=favorites, shares=shares,
             views=_number(stats.get("play_count")), danmaku=0,
             content_type="图文" if images or item.get("aweme_type") == 68 else "视频",
             hot_score=_heat(likes, comments, favorites, shares), ranking_basis="互动热度",
+            cover_url=cover,
             url=(item.get("share_url") or _dict(item.get("share_info")).get("share_url") or (f"https://www.douyin.com/note/{post_id}" if images or item.get("aweme_type") == 68 else f"https://www.douyin.com/video/{post_id}")),
         ))
     return sorted(result, key=lambda item: (item["hot_score"], item["likes"]), reverse=True)[:3]
@@ -183,6 +202,7 @@ def parse_bilibili_posts(body, now=None):
             published_at=published.isoformat(), likes=likes, comments=comments, favorites=favorites, shares=0,
             views=views, danmaku=danmaku, content_type="视频",
             hot_score=_heat(likes, comments, favorites, views=views, danmaku=danmaku), ranking_basis="互动热度",
+            cover_url=_image_url(item.get("pic") or item.get("cover")),
             url=item.get("arcurl") or (f"https://www.bilibili.com/video/{bvid}" if bvid else f"https://www.bilibili.com/video/av{post_id}"),
         ))
     return result
@@ -226,6 +246,7 @@ def parse_bilibili_all_posts(body, now=None):
             published_at=published.isoformat(), likes=likes, comments=comments, favorites=favorites, shares=shares,
             views=views, danmaku=danmaku, content_type="视频" if is_video else "图文/专栏",
             hot_score=_heat(likes, comments, favorites, shares, views, danmaku), ranking_basis="互动热度",
+            cover_url=_image_url(nested.get("cover") or nested.get("pic") or row.get("cover")),
             url=uri if str(uri or "").startswith("http") else (f"https://www.bilibili.com/video/av{post_id}" if is_video else f"https://www.bilibili.com/opus/{post_id}"),
         ))
     return result
@@ -303,6 +324,7 @@ def parse_zhihu_posts(body, now=None):
             published_at=published.isoformat(), likes=likes, comments=comments, favorites=favorites,
             shares=None, views=views if views else None, danmaku=0, content_type=labels.get(kind, "内容"),
             hot_score=_heat(likes, comments, favorites, views=views), ranking_basis="互动热度",
+            cover_url=_image_url(item.get("thumbnail") or item.get("cover") or item.get("image_url")),
             url=_zhihu_url(item, post_id, kind),
         ))
     return _dedupe_top(result)
@@ -346,6 +368,7 @@ def parse_xiaohongshu_posts(body, now=None):
         shares = _number(item.get("shared_count") or item.get("share_count"))
         note_type = str(item.get("type") or item.get("note_type") or "normal").lower()
         token = item.get("xsec_token") or row.get("xsec_token")
+        cover = _image_url(item.get("cover") or item.get("cover_url") or item.get("image_list") or item.get("images_list"))
         url = f"https://www.xiaohongshu.com/explore/{post_id}"
         if token:
             from urllib.parse import urlencode
@@ -354,7 +377,7 @@ def parse_xiaohongshu_posts(body, now=None):
             post_id=post_id, title=title, author=_text(author.get("nickname") or author.get("name")) or "未知作者",
             published_at=published.isoformat(), likes=likes, comments=comments, favorites=favorites, shares=shares,
             views=None, danmaku=0, content_type="视频" if note_type == "video" else "图文",
-            hot_score=_heat(likes, comments, favorites, shares), ranking_basis="互动热度", url=url,
+            hot_score=_heat(likes, comments, favorites, shares), ranking_basis="互动热度", cover_url=cover, url=url,
         ))
     return _dedupe_top(result)
 

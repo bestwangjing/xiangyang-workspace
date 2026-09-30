@@ -129,6 +129,55 @@ def _stored(publication_id):
         return dict(title=row['title'], body_text=row['body_text'], cover_url=row['cover_url'], media=media, fetched_at=row['fetched_at'])
 
 
+def _topic_source(topic_id):
+    with db.connect() as c:
+        topic = db.one(c, 'SELECT * FROM topic_candidates WHERE id=?', (topic_id,))
+    if not topic:
+        raise ProviderError('选题不存在')
+    payload = db.load(topic['payload'])
+    source = payload.get('source') if isinstance(payload, dict) else None
+    if not isinstance(source, dict) or not source.get('post_id') or not source.get('platform'):
+        raise ProviderError('该选题没有可同步的来源帖子')
+    return topic, source
+
+
+def _fetch_topic_detail(source):
+    platform = source['platform']
+    post_id = source['post_id']
+    if platform == 'douyin':
+        aweme = (_fetch('/douyin/app/v3/fetch_one_video_v3', {'aweme_id': post_id}) or {}).get('aweme_detail') or {}
+        desc = aweme.get('desc') or source.get('title') or ''
+        media = _douyin_media(aweme)
+        return dict(title=desc.splitlines()[0].strip()[:200] or source.get('title') or '(未命名作品)', body_text=desc,
+                    cover_url=_renderable((aweme.get('video') or {}).get('cover', {}).get('url_list')) or source.get('cover_url'), media=media)
+    if platform == 'xiaohongshu':
+        path = '/xiaohongshu/app_v2/get_video_note_detail' if source.get('content_type') == '视频' else '/xiaohongshu/app_v2/get_image_note_detail'
+        note = _xhs_note(_fetch(path, {'note_id': post_id})) or {}
+        media = _xhs_media(note)
+        cover = (note.get('images_list') or [{}])[0].get('url') if note.get('images_list') else None
+        return dict(title=(note.get('title') or note.get('display_title') or source.get('title') or '').strip()[:200] or '(未命名笔记)',
+                    body_text=note.get('desc') or '', cover_url=cover or source.get('cover_url'), media=media)
+    raise ProviderError('当前仅支持同步小红书和抖音来源帖详情')
+
+
+def _stored_topic(topic_id):
+    with db.connect() as c:
+        row = db.one(c, 'SELECT * FROM topic_source_details WHERE topic_id=?', (topic_id,))
+    if not row:
+        return None
+    return dict(title=row['title'], body_text=row['body_text'], cover_url=row['cover_url'], media=db.load(row['media_json']), fetched_at=row['fetched_at'])
+
+
+def _store_topic(topic_id, source, detail):
+    observed = datetime.now(timezone.utc).isoformat()
+    with db.connect() as c:
+        c.execute('''INSERT INTO topic_source_details(topic_id,platform,platform_post_id,title,body_text,cover_url,media_json,fetched_at)
+            VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(topic_id) DO UPDATE SET title=excluded.title,body_text=excluded.body_text,
+            cover_url=excluded.cover_url,media_json=excluded.media_json,fetched_at=excluded.fetched_at''',
+            (topic_id, source['platform'], source['post_id'], detail['title'], detail['body_text'], detail['cover_url'], db.dump(detail['media']), observed))
+        db.audit(c, 'topic_source_detail_synced', topic_id)
+
+
 @router.get('/publications/{publication_id}/detail')
 def get_detail(publication_id: str):
     return dict(detail=_stored(publication_id))
@@ -144,3 +193,20 @@ def sync_detail(publication_id: str):
     detail = _fetch_detail(publication)
     _store(publication_id, detail)
     return dict(detail=_stored(publication_id))
+
+
+@router.get('/topics/{topic_id}/detail')
+def get_topic_detail(topic_id: str):
+    return dict(detail=_stored_topic(topic_id))
+
+
+@router.post('/topics/{topic_id}/sync-detail')
+def sync_topic_detail(topic_id: str):
+    try:
+        _topic, source = _topic_source(topic_id)
+        detail = _fetch_topic_detail(source)
+    except ProviderError as exc:
+        from .main import fail
+        fail(str(exc), 404 if str(exc) == '选题不存在' else 400)
+    _store_topic(topic_id, source, detail)
+    return dict(detail=_stored_topic(topic_id))

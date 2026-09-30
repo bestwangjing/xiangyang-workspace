@@ -117,3 +117,30 @@ def test_transient_400_is_retried_once(client):  # noqa: F811
     with patch.object(pd, 'provider_secret', return_value='test-key'), patch.object(pd, '_request', side_effect=flaky), patch.object(pd, 'reserve_call'):
         response = client.post('/api/publications/' + pub['id'] + '/sync-detail')
     assert response.status_code == 200 and calls['n'] == 2
+
+
+def test_topic_detail_first_sync_then_reads_local_cache(client):  # noqa: F811
+    worker.worker.stop()
+    topic_id = db.uid()
+    source = dict(platform='xiaohongshu', post_id='note-x1', title='来源标题', content_type='图文', cover_url='https://img.example/list-cover.jpg')
+    with db.connect() as c:
+        snapshot = db.snapshot(c)
+        c.execute('INSERT INTO topic_candidates VALUES(?,?,?,?,?,?,?)',
+                  (topic_id, '我的选题', db.dump(dict(source=source)), 'saved', snapshot['profile_version'], snapshot['topic_version'], db.now()))
+
+    assert client.get('/api/topics/' + topic_id + '/detail').json()['detail'] is None
+    with patch.object(pd, 'provider_secret', return_value='test-key'), patch.object(pd, '_request', side_effect=fake_detail_request), patch.object(pd, 'reserve_call') as budget:
+        response = client.post('/api/topics/' + topic_id + '/sync-detail')
+    assert response.status_code == 200, response.text
+    detail = response.json()['detail']
+    assert detail['title'] == XHS_IMAGE_NOTE['title']
+    assert detail['cover_url'] == 'https://img.example/x1.jpg'
+    assert len(detail['media']) == 3
+    budget.assert_called_once_with('tikhub', 'post_detail')
+
+    # Reopening the detail page must use SQLite and not call the paid provider again.
+    with patch.object(pd, '_request', side_effect=AssertionError('cache read must not request provider')):
+        cached = client.get('/api/topics/' + topic_id + '/detail').json()['detail']
+    assert cached == detail
+    listed = next(item for item in client.get('/api/topics').json() if item['id'] == topic_id)
+    assert listed['source_detail']['media'][1]['url'] == 'https://img.example/x2.jpg'

@@ -223,6 +223,37 @@ def edit_publication(publication_id:str,value:dict):
         db.audit(c,'publication_edited',publication_id)
     return dict(ok=True)
 
+@app.patch('/api/publications/{publication_id}/metrics')
+def edit_publication_metrics(publication_id:str,value:dict):
+    """Manual metric edit: stored as its own snapshot so history stays auditable."""
+    from . import sync
+    from .metrics import METRICS
+    raw=value.get('metrics')
+    if not isinstance(raw,dict) or not raw: fail('请至少填写一项指标')
+    clean={}
+    for key,num in raw.items():
+        if key not in METRICS: fail('不支持的指标：'+str(key))
+        if num is None or num=='': continue
+        try: num=float(num)
+        except (TypeError,ValueError): fail('指标必须是非负数值')
+        if not __import__('math').isfinite(num) or num<0: fail('指标必须是非负数值；不需要的项请留空')
+        if key in ['completion_rate','click_rate'] and num>100: fail('百分比请按0至100填写')
+        clean[key]=num
+    if not clean: fail('请至少填写一项有效指标')
+    observed=datetime.now(timezone(timedelta(hours=8))).isoformat()
+    with db.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not db.one(c,'SELECT id FROM publications WHERE id=?',(publication_id,)): fail('发布记录不存在',404)
+        snapshot=db.uid()
+        dedupe=sync.digest(['manual_edit',publication_id,observed,clean])
+        c.execute('INSERT INTO metric_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                  (snapshot,publication_id,None,None,'manual_edit',observed,None,None,'cumulative',dedupe,db.now()))
+        for key,num in clean.items():
+            c.execute('INSERT INTO metric_values VALUES(?,?,?,?,0)',
+                      (snapshot,key,num,'percent' if key in ['completion_rate','click_rate'] else 'seconds' if key=='watch_seconds' else 'count'))
+        db.audit(c,'publication_metrics_edited',publication_id)
+    return dict(ok=True,snapshot_id=snapshot)
+
 def latest_metrics(c,column,subject):
     # Preserve unknown timestamps; never treat upload time as observation time.
     rows=db.rows(c,f"""SELECT s.id,s.observed_at,s.scope,s.source FROM metric_snapshots s
@@ -322,7 +353,7 @@ def cancel_job(job_id:str):
         job=db.one(c,'SELECT * FROM jobs WHERE id=?',(job_id,))
         if not job: fail('任务不存在',404)
         if job['state'] in ['queued','waiting_auth','waiting_quota','blocked_config','needs_model_selection']: state='cancelled'
-        elif job['state']=='running' and job['type'] in ['review','plan','topics','model_test','trend_relevance','screenshot_batch']:state='cancelling'
+        elif job['state']=='running' and job['type'] in ['review','plan','topics','experience','model_test','trend_relevance','screenshot_batch']:state='cancelling'
         else:fail('当前任务不支持直接取消；远端状态不明时请先核实',409)
         c.execute('UPDATE jobs SET state=?,updated_at=? WHERE id=?',(state,db.now(),job_id))
         db.audit(c,'cancel_requested',job_id)

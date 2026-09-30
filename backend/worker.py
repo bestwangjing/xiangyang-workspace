@@ -1,7 +1,7 @@
 import threading
 from . import db,sync
 
-GENERATIONS=('review','plan','topics','model_test','trend_relevance','screenshot_batch')
+GENERATIONS=('review','plan','topics','experience','model_test','trend_relevance','screenshot_batch')
 
 def enqueue(kind,payload,key=None,exclusive=False):
     payload={k:v for k,v in payload.items() if k!='idempotency_key'}
@@ -37,11 +37,11 @@ class Worker:
                 with db.connect() as c:
                     c.execute('BEGIN IMMEDIATE')
                     c.execute("UPDATE jobs SET state='queued',next_retry_at=NULL WHERE state='waiting_quota' AND next_retry_at IS NOT NULL AND next_retry_at<=? AND attempts<4 AND config_version_id=(SELECT config_version_id FROM active_model WHERE id=1)",(db.now(),))
-                    locked=c.execute("SELECT 1 FROM jobs WHERE state IN ('running','recovery_required','cancelling') AND type IN ('review','plan','topics','model_test','trend_relevance','screenshot_batch')").fetchone()
-                    job=db.one(c,"SELECT * FROM jobs WHERE state='queued' AND (?=0 OR type NOT IN ('review','plan','topics','model_test','trend_relevance','screenshot_batch')) ORDER BY created_at LIMIT 1",(1 if locked else 0,))
+                    locked=c.execute("SELECT 1 FROM jobs WHERE state IN ('running','recovery_required','cancelling') AND type IN ('review','plan','topics','experience','model_test','trend_relevance','screenshot_batch')").fetchone()
+                    job=db.one(c,"SELECT * FROM jobs WHERE state='queued' AND (?=0 OR type NOT IN ('review','plan','topics','experience','model_test','trend_relevance','screenshot_batch')) ORDER BY created_at LIMIT 1",(1 if locked else 0,))
                     if not job: continue
                     if job['type'] in GENERATIONS:
-                        unresolved=c.execute("SELECT 1 FROM jobs WHERE state IN ('running','recovery_required','cancelling') AND type IN ('review','plan','topics','model_test','trend_relevance','screenshot_batch')").fetchone()
+                        unresolved=c.execute("SELECT 1 FROM jobs WHERE state IN ('running','recovery_required','cancelling') AND type IN ('review','plan','topics','experience','model_test','trend_relevance','screenshot_batch')").fetchone()
                         if unresolved: continue
                         active=db.one(c,'SELECT * FROM active_model')
                         if active['config_version_id']!=job['config_version_id']:

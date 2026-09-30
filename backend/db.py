@@ -61,8 +61,12 @@ CREATE TABLE IF NOT EXISTS model_configs(id TEXT PRIMARY KEY, name TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS model_config_versions(id TEXT PRIMARY KEY, config_id TEXT REFERENCES model_configs(id), version INTEGER NOT NULL, model_id TEXT, base_url TEXT, credential_ref TEXT REFERENCES credentials(id), parameters TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(config_id,version));
 CREATE TABLE IF NOT EXISTS active_model(id INTEGER PRIMARY KEY CHECK(id=1), config_version_id TEXT NOT NULL REFERENCES model_config_versions(id), revision INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS topic_candidates(id TEXT PRIMARY KEY, title TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, profile_version INTEGER NOT NULL, rules_version INTEGER NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS topic_source_details(topic_id TEXT PRIMARY KEY REFERENCES topic_candidates(id) ON DELETE CASCADE, platform TEXT NOT NULL, platform_post_id TEXT NOT NULL, title TEXT, body_text TEXT, cover_url TEXT, media_json TEXT NOT NULL DEFAULT '[]', fetched_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS creation_plans(id TEXT PRIMARY KEY, markdown_text TEXT NOT NULL, metadata TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS review_reports(id TEXT PRIMARY KEY, kind TEXT NOT NULL, scope_json TEXT NOT NULL, computed_metrics_json TEXT NOT NULL, report_json TEXT NOT NULL, html_text TEXT NOT NULL, metadata TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS post_review_library(publication_id TEXT PRIMARY KEY REFERENCES publications(id) ON DELETE CASCADE, review_id TEXT UNIQUE REFERENCES review_reports(id), imported_at TEXT NOT NULL, reviewed_at TEXT);
+CREATE TABLE IF NOT EXISTS experience_entries(id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('single','linked')), title TEXT NOT NULL, category TEXT NOT NULL, formats_json TEXT NOT NULL, conclusion TEXT NOT NULL, conditions TEXT NOT NULL, limitations TEXT NOT NULL, analysis_json TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS experience_sources(experience_id TEXT NOT NULL REFERENCES experience_entries(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('single','before','after')), publication_id TEXT NOT NULL REFERENCES publications(id), evidence_ids_json TEXT NOT NULL, metrics_json TEXT NOT NULL, observed_at TEXT, window_label TEXT, PRIMARY KEY(experience_id,role));
 CREATE TABLE IF NOT EXISTS reference_posts(id TEXT PRIMARY KEY, title TEXT NOT NULL, url TEXT, author TEXT, fans REAL, likes REAL, saves REAL, comments REAL, observed_at TEXT NOT NULL, payload TEXT NOT NULL, favorite INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS trend_samples(id TEXT PRIMARY KEY, platform TEXT NOT NULL, upstream_key TEXT NOT NULL, observed_at TEXT, collected_at TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL, UNIQUE(platform,upstream_key));
 CREATE TABLE IF NOT EXISTS hot_topic_snapshots(id TEXT PRIMARY KEY, platform TEXT NOT NULL, collected_at TEXT NOT NULL, profile_version INTEGER NOT NULL, keywords TEXT NOT NULL, payload TEXT NOT NULL);
@@ -125,7 +129,7 @@ def initialize():
             c.execute("INSERT INTO model_config_versions VALUES('codex-v1','codex',1,NULL,NULL,NULL,'{}',?)",(now(),))
             c.execute("INSERT INTO active_model VALUES(1,'codex-v1',1)")
         # Never automatically repeat an inference that might still exist upstream.
-        c.execute("UPDATE jobs SET state=CASE WHEN type IN ('review','plan','topics','model_test','trend_relevance','screenshot_batch') THEN 'recovery_required' ELSE 'interrupted' END, updated_at=? WHERE state IN ('running','cancelling')",(now(),))
+        c.execute("UPDATE jobs SET state=CASE WHEN type IN ('review','plan','topics','experience','model_test','trend_relevance','screenshot_batch') THEN 'recovery_required' ELSE 'interrupted' END, updated_at=? WHERE state IN ('running','cancelling')",(now(),))
     marker.touch(exist_ok=True)
 
 @contextmanager

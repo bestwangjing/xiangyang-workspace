@@ -23,7 +23,7 @@ def check_cancellation(job_id):
     with db.connect() as c: job=db.one(c,'SELECT state FROM jobs WHERE id=?',(job_id,))
     if job and job['state']=='cancelling':raise ProviderError('请求已结束，取消已确认。','cancelled')
 
-def busy(c): return bool(c.execute("SELECT 1 FROM jobs WHERE type IN ('review','plan','topics','model_test','trend_relevance','screenshot_batch') AND state IN ('running','recovery_required','cancelling')").fetchone())
+def busy(c): return bool(c.execute("SELECT 1 FROM jobs WHERE type IN ('review','plan','topics','experience','model_test','trend_relevance','screenshot_batch') AND state IN ('running','recovery_required','cancelling')").fetchone())
 def conflict(message): raise HTTPException(409,dict(message=message,code='version_or_busy'))
 
 def validate_input(v):
