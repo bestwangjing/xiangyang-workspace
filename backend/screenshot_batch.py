@@ -15,6 +15,15 @@ LABELS = {
     'watch_seconds':['平均观看时长','平均播放时长'],
 }
 
+def review_evidence_kind(blocks):
+    """Classify useful review screenshots that are not top-level post totals."""
+    joined=' '.join(str(block.get('text','')) for block in blocks)
+    if '此渠道详细数据' in joined or ('观看来源' in joined and any(x in joined for x in ['首页推荐','个人主页','关注页面','其他来源'])):
+        return 'traffic_source'
+    if '观众画像' in joined or all(x in joined for x in ['性别分布','年龄分布']):
+        return 'audience_profile'
+    return None
+
 def normalized(text): return re.sub(r'[^\w\u4e00-\u9fff]', '', text).casefold()
 
 def start_batch(value):
@@ -123,6 +132,19 @@ def metric_values(record,blocks,selected_post=False):
 def apply_selected_post(id,platform,proposal,parsed,publication_id=None):
     """The explicit user selection determines ownership; OCR supplies numbers only."""
     blocks=parsed['blocks']; values={}; estimated=set(); conflicts=set()
+    with db.connect() as c:
+        post=db.one(c,'''SELECT p.id,COALESCE(o.title,p.title_override,r.title) title FROM publications p
+            LEFT JOIN contents c ON c.id=p.content_id
+            LEFT JOIN content_revisions r ON r.content_id=c.id AND r.revision=c.revision
+            LEFT JOIN publication_overrides o ON o.publication_id=p.id
+            WHERE p.id=? AND p.platform=?''',(publication_id,platform))
+        if not post: raise ValueError('所选作品不存在或不属于该平台')
+        pub=post['id']; title=post['title']
+    evidence_kind=review_evidence_kind(blocks)
+    # A traffic-source detail is a subset of the post total. Its exposure/views
+    # remain review evidence and must never overwrite the top-level totals.
+    if evidence_kind:
+        return dict(updated=[dict(title=title,metrics={},publication_id=pub,evidence_only=True,evidence_kind=evidence_kind)],reasons=[])
     for record in proposal.get('records',[]):
         extracted,approximate=metric_values(record,blocks,selected_post=True)
         for key,value in extracted.items():
@@ -132,14 +154,6 @@ def apply_selected_post(id,platform,proposal,parsed,publication_id=None):
     for key in conflicts: values.pop(key,None)
     if not values:
         return dict(updated=[],reasons=[proposal.get('reason') or '未识别到可更新的单篇指标数值'])
-    with db.connect() as c:
-        post=db.one(c,'''SELECT p.id,COALESCE(o.title,p.title_override,r.title) title FROM publications p
-            LEFT JOIN contents c ON c.id=p.content_id
-            LEFT JOIN content_revisions r ON r.content_id=c.id AND r.revision=c.revision
-            LEFT JOIN publication_overrides o ON o.publication_id=p.id
-            WHERE p.id=? AND p.platform=?''',(publication_id,platform))
-        if not post: raise ValueError('所选作品不存在或不属于该平台')
-        pub=post['id']; title=post['title']
     result=confirm(id,dict(publication_id=pub,scope='cumulative',metrics=values))
     with db.connect() as c:
         if not result.get('duplicate'):

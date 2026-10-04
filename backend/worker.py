@@ -1,5 +1,5 @@
 import threading
-from . import db,sync
+from . import db,sync,job_progress
 
 GENERATIONS=('review','plan','topics','experience','model_test','trend_relevance','screenshot_batch')
 
@@ -47,6 +47,7 @@ class Worker:
                         if active['config_version_id']!=job['config_version_id']:
                             c.execute("UPDATE jobs SET state='needs_model_selection' WHERE id=?",(job['id'],)); continue
                     c.execute("UPDATE jobs SET state='running',attempts=attempts+1,updated_at=? WHERE id=?",(db.now(),job['id']))
+                job_progress.start(job['id'],job['type'])
                 try:
                     payload=db.load(job['payload'])
                     if job['type']=='screenshot_batch':
@@ -86,6 +87,8 @@ class Worker:
                     retry_at=getattr(exc,'retry_at',None)
                 with db.connect() as c:
                     c.execute("UPDATE jobs SET state=?,result=CASE WHEN ?='recovery_required' THEN result ELSE ? END,error=?,next_retry_at=?,updated_at=? WHERE id=?",(state,state,db.dump(result) if result else None,error,retry_at,db.now(),job['id']))
+                if state=='completed':job_progress.finish(job['id'])
+                elif state not in ['running','queued']:job_progress.stop(job['id'],state,error or state)
             except Exception:
                 # Storage errors must not cause a busy retry loop or lose the durable running record.
                 self.event.wait(3)

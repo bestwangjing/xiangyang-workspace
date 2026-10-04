@@ -124,9 +124,16 @@ def test_xhs_preview_plan_supports_revision_and_bundle_download(client):
     assert first.status_code==200,first.text
     with db.connect() as c:first_payload=db.load(db.one(c,'SELECT payload FROM jobs WHERE id=?',(first.json()['id'],))['payload'])
     assert first_payload['intent']=='new' and first_payload['selected_topic']['source_detail']['body_text']=='来源正文'
+    visible_job=next(job for job in client.get('/api/jobs').json() if job['id']==first.json()['id'])
+    assert visible_job['context']==dict(topic_id=topic_id,previous_plan_id=None,output='xiaohongshu_preview',thoughts='写一篇可发布的图文')
+    assert 'payload' not in visible_job
 
-    model_text=db.dump(dict(title='AI选题实战',body_text='这是完整正文。',hashtags=['AI工具','内容创作'],image_pages=[dict(heading='封面',subheading='一句话结果',visual_note='红白信息卡')]))
-    with patch('backend.models.generate_text',return_value=dict(text=model_text,model='test')):
+    style=db.dump(dict(summary='高信息密度卡片风',hook_pattern='痛点反差',copy_structure=['痛点','拆解','行动'],visual_style='蓝白信息卡',palette=['#F4F7FB','#175CD3'],layout_rules=['大标题','卡片列表'],originality_boundary='只借鉴结构'))
+    pages=[]
+    for index in range(5):
+        pages.append(dict(page_type='cover' if index==0 else 'feature',layout='hero' if index==0 else 'list',eyebrow='AI实战',heading='AI\n选题实战' if index==0 else f'重点 {index}',subheading='一句话说清这一页',bullets=['具体场景与做法','可以立刻执行的建议'],callout='记住这一点',icon='spark',visual_note='蓝白信息卡'))
+    preview=dict(title='AI选题实战',cover_title='AI选题实战',body_text='很多人做选题时只盯着热度，却没有判断它是否适合自己的受众。真正有效的做法，是先看用户正在解决什么问题，再结合自己的经验和可验证素材，找到一个能讲清楚的切口。\n\n这篇内容从需求、角度、素材、表达和验证五个方面逐一拆解。每一步都不是追求看起来很厉害，而是让读者知道为什么值得看、看完能做什么。发布后还要观察收藏、评论和阅读完成情况，再决定下一轮怎么优化。\n\n具体执行时，可以先写下目标读者正在反复遇到的一个问题，再列出自己能够提供的案例、过程截图和操作步骤。标题负责说清收益，封面负责制造停留，正文则要兑现承诺。不要为了追热点临时拼凑自己没有验证过的结论，也不要一次塞进太多互不相关的观点。\n\n先从一个具体问题开始，把过程讲清楚，比一次堆满所有观点更容易建立信任。你现在最想优化选题的哪一步？',hashtags=['AI工具','内容创作','选题方法'],design_system=dict(style_summary='蓝白高密度信息卡',background='#F4F7FB',secondary_background='#E7EFFA',primary='#175CD3',accent='#FFCC33',text='#172033',surface='#FFFFFF'),image_pages=pages,quality_review=dict(score=92,hook=91,specificity=90,visual_fidelity=92,issues=[]))
+    with patch('backend.reports._reference_images',return_value=[]),patch('backend.models.generate_text',side_effect=[dict(text=style,model='test',thread_id='creative-thread'),dict(text=db.dump(preview),model='test',thread_id='creative-thread')]):
         created=reports.generate(first.json()['id'],'plan',first_payload)
     plan_id=created['id']
     listed=next(plan for plan in client.get('/api/plans').json() if plan['id']==plan_id)
@@ -137,10 +144,13 @@ def test_xhs_preview_plan_supports_revision_and_bundle_download(client):
     with db.connect() as c:revision_payload=db.load(db.one(c,'SELECT payload FROM jobs WHERE id=?',(revision.json()['id'],))['payload'])
     assert revision_payload['intent']=='revise'
     assert revision_payload['previous_preview']['title']=='AI选题实战'
+    assert revision_payload['resume_thread_id']=='creative-thread'
+    visible_revision=next(job for job in client.get('/api/jobs').json() if job['id']==revision.json()['id'])
+    assert visible_revision['context']['topic_id']==topic_id
+    assert visible_revision['context']['previous_plan_id']==plan_id
 
-    with patch('backend.reports.httpx.get',side_effect=reports.httpx.HTTPError('offline fixture')):
-        archive=client.get('/api/plans/'+plan_id+'/bundle')
+    archive=client.get('/api/plans/'+plan_id+'/bundle')
     assert archive.status_code==200 and archive.headers['content-type']=='application/zip'
     with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
-        assert {'标题.txt','正文.txt','话题标签.txt','完整创作方案.md','媒体链接.txt','下载说明.txt'} <= set(bundle.namelist())
+        assert {'标题.txt','正文.txt','话题标签.txt','完整创作方案.md','成品图片/01.png','下载说明.txt'} <= set(bundle.namelist())
         assert bundle.read('标题.txt').decode()=='AI选题实战'

@@ -254,20 +254,28 @@ def edit_publication_metrics(publication_id:str,value:dict):
         db.audit(c,'publication_metrics_edited',publication_id)
     return dict(ok=True,snapshot_id=snapshot)
 
-def latest_metrics(c,column,subject):
+def latest_metrics(c,column,subject,observed_before=None):
     # Preserve unknown timestamps; never treat upload time as observation time.
-    rows=db.rows(c,f"""SELECT s.id,s.observed_at,s.scope,s.source FROM metric_snapshots s
+    rows=db.rows(c,f"""SELECT s.id,s.observed_at,s.scope,s.source,e.parser_json FROM metric_snapshots s
         LEFT JOIN evidence e ON e.id=s.evidence_id
         WHERE s.{column}=? AND s.scope='cumulative'
+        AND (? IS NULL OR s.observed_at IS NULL OR julianday(s.observed_at)<julianday(?))
         ORDER BY julianday(s.observed_at) DESC,
         CASE WHEN s.source='screenshot_selected_post' THEN julianday(e.received_at) ELSE julianday(s.created_at) END DESC,
-        s.created_at DESC""",(subject,))
+        s.created_at DESC""",(subject,observed_before,observed_before))
     from .metrics import effective_values
     values={};sources={}
     seen=set()
     for row in rows:
         if row['id'] in seen: continue
         seen.add(row['id'])
+        # Older versions could store a channel-detail card (for example
+        # 首页推荐曝光) as if it were the whole post. Keep that screenshot as
+        # review evidence, but do not let the subset replace post totals.
+        if row['source']=='screenshot_selected_post' and row.get('parser_json'):
+            from .screenshot_batch import review_evidence_kind
+            if review_evidence_kind(db.load(row['parser_json']).get('blocks',[]))=='traffic_source':
+                continue
         for key,value in effective_values(c,row['id']).items():
             if key not in values:
                 values[key]=value;sources[key]=dict(snapshot_id=row['id'],observed_at=row['observed_at'],source=row['source'])
@@ -312,13 +320,25 @@ def dashboard(days:int=15):
 
 @app.get('/api/jobs')
 def jobs():
+    from . import job_progress
+    from .worker import GENERATIONS
     with db.connect() as c:
-        result=db.rows(c,'SELECT id,type,state,result,error,attempts,next_retry_at,created_at,updated_at FROM jobs ORDER BY created_at DESC LIMIT 50')
+        result=db.rows(c,'SELECT id,type,state,result,error,attempts,next_retry_at,created_at,updated_at,payload FROM jobs ORDER BY created_at DESC LIMIT 50')
         for item in result:
             item['result']=db.load(item['result']) if item['result'] else None
+            payload=db.load(item.pop('payload')) if item.get('payload') else {}
+            if item['type']=='plan':
+                item['context']={
+                    'topic_id':payload.get('topic_id'),
+                    'previous_plan_id':payload.get('previous_plan_id'),
+                    'output':payload.get('output'),
+                    'thoughts':payload.get('thoughts',''),
+                }
             if item['type']=='screenshot_batch':
                 from .screenshot_batch import progress
                 item['progress']=progress(c,item['id'])
+            elif item['type'] in GENERATIONS:
+                item['progress']=job_progress.view(c,item)
         return result
 
 @app.post('/api/jobs/{job_id}/retry')

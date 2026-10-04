@@ -167,6 +167,40 @@ def test_selected_post_overlapping_values_follow_upload_order(client):
         payload=db.load(db.one(c,'SELECT payload FROM jobs WHERE id=?',(job['id'],))['payload'])
     assert payload['evidence_ids']==[older,newer]
 
+def test_selected_post_keeps_traffic_source_breakdown_as_review_evidence(client):
+    evidence_id,_,_,_,_,pub=setup(client)
+    overview={'blocks':[{'text':t,'confidence':99} for t in ['曝光数','3546','观看数','354']]}
+    overview_proposal={'records':[{'kind':'post','title_indices':[],'scope':'cumulative','metrics':[
+        {'key':'impressions','label_index':0,'value_index':1,'value_text':'3546','confidence':.99},
+        {'key':'views','label_index':2,'value_index':3,'value_text':'354','confidence':.99}]}]}
+    assert batch.apply_proposal(evidence_id,'xiaohongshu',overview_proposal,overview,pub['id'])['updated']
+
+    channel={'blocks':[{'text':t,'confidence':99} for t in ['观看来源','首页推荐','此渠道详细数据','曝光数','3079','观看数','271']]}
+    channel_proposal={'records':[{'kind':'post','title_indices':[],'scope':'cumulative','metrics':[
+        {'key':'impressions','label_index':3,'value_index':4,'value_text':'3079','confidence':.99},
+        {'key':'views','label_index':5,'value_index':6,'value_text':'271','confidence':.99}]}]}
+    outcome=batch.apply_proposal(evidence_id,'xiaohongshu',channel_proposal,channel,pub['id'])
+    assert outcome['updated'][0]['evidence_only']
+    assert outcome['updated'][0]['evidence_kind']=='traffic_source'
+    assert client.get('/api/publications').json()[0]['metrics']['values']['impressions']==3546
+    assert client.get('/api/publications').json()[0]['metrics']['values']['views']==354
+
+def test_legacy_channel_snapshot_cannot_override_post_totals(client):
+    evidence_id,_,_,_,_,pub=setup(client)
+    with db.connect() as c:
+        c.execute('UPDATE evidence SET parser_json=? WHERE id=?',(db.dump({'blocks':[{'text':'数据概览'}]}),evidence_id))
+    from backend.metrics import confirm
+    total=confirm(evidence_id,dict(publication_id=pub['id'],scope='cumulative',metrics={'impressions':3546,'views':354}))
+    with db.connect() as c:c.execute("UPDATE metric_snapshots SET source='screenshot_selected_post' WHERE id=?",(total['id'],))
+    channel_id=db.uid()
+    with db.connect() as c:
+        c.execute('INSERT INTO evidence(id,kind,relative_path,sha256,received_at,parser_json) VALUES(?,?,?,?,?,?)',
+                  (channel_id,'screenshot','evidence/channel.png','channel-sha',db.now(),db.dump({'blocks':[{'text':'观看来源'},{'text':'首页推荐'},{'text':'此渠道详细数据'}]})))
+    channel=confirm(channel_id,dict(publication_id=pub['id'],scope='cumulative',metrics={'impressions':3079,'views':271}))
+    with db.connect() as c:c.execute("UPDATE metric_snapshots SET source='screenshot_selected_post' WHERE id=?",(channel['id'],))
+    values=client.get('/api/publications').json()[0]['metrics']['values']
+    assert values['impressions']==3546 and values['views']==354
+
 def test_reset_clears_upload_inbox_but_preserves_evidence_and_allows_reupload(client):
     raw=png();evidence_id=client.post('/api/updates/screenshots',files={'file':('a.png',raw)}).json()['id']
     assert len(client.get('/api/evidence').json())==1

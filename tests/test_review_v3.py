@@ -1,6 +1,8 @@
+import io
 from unittest.mock import patch
+from PIL import Image
 
-from backend import db,reports,worker
+from backend import db,reports,worker,screenshot_batch
 from test_workspace import client,make_publication,png
 
 
@@ -30,13 +32,45 @@ def test_post_review_import_requires_screenshot_and_locks_after_completion(clien
         p1=[dict(title='强化关注理由',evidence='涨粉转化仍有空间',action='增加系列预告',metric='每千阅读涨粉')],
         metric_analysis=[dict(metric='收藏率',value='14%',baseline='账号同类基线待补',judgement='表现较好',action='保留步骤清单')],
         facts=['后台截图已提供'],inferences=['封面可能限制点击'],unknowns=[],counterexamples=['单篇样本不代表稳定规律'],experiments=['下一篇只测试封面'])
-    with patch('backend.models.generate_text',return_value=dict(text=db.dump(model_report),model='test')):
+    evidence_context=dict(evidence_summary='截图和指标已核对',metric_facts=['曝光2000，阅读300'],comparison_notes=['单篇仅作初步比较'],unknowns=[],diagnostic_hypotheses=['封面可能限制点击'])
+    with patch('backend.models.generate_text',side_effect=[
+        dict(text=db.dump(evidence_context),model='test',thread_id='review-thread'),
+        dict(text=db.dump(model_report),model='test',thread_id='review-thread'),
+    ]) as generation:
         result=reports.generate(job['id'],'review',payload)
+    assert generation.call_count==2
+    assert generation.call_args_list[0].kwargs['persistent'] is True
+    assert generation.call_args_list[0].kwargs['thread_id'] is None
+    assert generation.call_args_list[1].kwargs['thread_id']=='review-thread'
     library=client.get('/api/post-reviews').json()
     assert library[0]['review_status']=='reviewed' and library[0]['review_id']==result['id']
     assert client.post('/api/post-reviews/'+post['id']+'/start',json={}).status_code==400
     detail=client.get('/api/post-reviews/'+post['id']+'/report').json()
     assert detail['report_json']['score']==76 and detail['publication']['title']=='待复盘优秀帖子'
+    assert detail['metadata']['sdk_thread_id']=='review-thread'
+
+
+def test_review_merges_metric_sources_and_includes_non_metric_bound_images(client):
+    worker.worker.stop()
+    post=make_publication('xiaohongshu',title='多维复盘帖子')
+    with db.connect() as c:
+        snapshot=db.uid()
+        c.execute('INSERT INTO metric_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                  (snapshot,post['id'],None,None,'platform_api','2026-10-02T00:00:00+08:00',None,None,'cumulative','api-key',db.now()))
+        c.execute('INSERT INTO metric_values VALUES(?,?,?,?,0)',(snapshot,'likes',18,'count'))
+    add_screenshot_metrics(client,post['id'],dict(impressions=3546,views=354,click_rate=9.4,watch_seconds=34.8,new_follows=10))
+    computed=reports.compute([post['id']])['items'][0]
+    assert computed['metrics']['likes']==18
+    assert computed['metrics']['impressions']==3546
+    assert computed['metrics']['views']==354
+    assert set(computed['metric_sources'])>={'likes','impressions','views'}
+
+    buffer=io.BytesIO();Image.new('RGB',(81,90),'white').save(buffer,format='PNG')
+    audience=client.post('/api/updates/screenshots',files={'file':('audience.png',buffer.getvalue(),'image/png')}).json()['id']
+    batch=screenshot_batch.start_batch({'platform':'xiaohongshu','evidence_ids':[audience],'publication_id':post['id']})
+    screenshot_batch.checkpoint(batch['id'],audience,'attention','处理完成',{'updated':[],'reasons':['仅观众画像']},1)
+    images=reports._review_images(post['id'])
+    assert len(images)>=2, '复盘必须同时包含指标截图和只用于分析的观众画像截图'
 
 
 def test_single_and_linked_experience_are_user_confirmed_and_traceable(client):
